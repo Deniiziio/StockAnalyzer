@@ -385,66 +385,242 @@ class RiskAnalysis(AnalysisModule):
 
 
 class NewsSentimentAnalysis(AnalysisModule):
+    def __init__(self):
+        """Initialize sentiment analysis with comprehensive word lists"""
+        self.sentiment_words = {
+            'positive': {
+                'strong': {
+                    'surge', 'soar', 'triumph', 'exceed', 'beat', 'breakthrough', 'record',
+                    'exceptional', 'outstanding', 'revolutionary', 'milestone'
+                },
+                'moderate': {
+                    'up', 'rise', 'gain', 'growth', 'profit', 'improve', 'positive', 'advance',
+                    'increase', 'higher', 'strong', 'success', 'boost', 'recovery', 'progress'
+                }
+            },
+            'negative': {
+                'strong': {
+                    'plunge', 'crash', 'collapse', 'disaster', 'crisis', 'fail', 'bankruptcy',
+                    'devastating', 'terrible', 'catastrophic', 'plummet'
+                },
+                'moderate': {
+                    'down', 'fall', 'drop', 'decline', 'loss', 'debt', 'weak', 'negative',
+                    'concern', 'risk', 'struggle', 'problem', 'decrease', 'lower', 'warning'
+                }
+            }
+        }
+
     def analyze(self, data: pd.DataFrame, stock: yf.Ticker) -> Dict[str, Any]:
+        """Analyze news sentiment with enhanced error handling and validation"""
         try:
             news = stock.news
             if not news:
+                print("No recent news found for analysis")
                 return {}
 
-            sentiment_scores = self._calculate_sentiment_scores(news[:10])
+            # Process last 30 days of news
+            recent_news = self._filter_recent_news(news)
+            if not recent_news:
+                print("No news articles within the last 30 days")
+                return {}
+
+            # Calculate detailed sentiment metrics
+            sentiment_data = self._analyze_sentiment_detailed(recent_news)
+            volume_trend = self._calculate_news_volume_trend(recent_news)
 
             return {
-                'Average Sentiment': np.mean(sentiment_scores),
-                'Recent News Count': len(news),
-                'Sentiment Trend': 'Positive' if np.mean(sentiment_scores) > 0 else 'Negative'
+                'Average Sentiment': sentiment_data['average_sentiment'],
+                'Recent News Count': len(recent_news),
+                'Strong Positive Count': sentiment_data['strong_positive_count'],
+                'Strong Negative Count': sentiment_data['strong_negative_count'],
+                'Sentiment Trend': sentiment_data['trend'],
+                'News Volume Trend': volume_trend,
+                'Latest Headlines': sentiment_data['latest_headlines']
             }
+
         except Exception as e:
             print(f"Error in news sentiment analysis: {e}")
             return {}
 
     def score(self, results: Dict[str, Any]) -> float:
+        """Calculate comprehensive sentiment score"""
         if not results:
             return 0
 
-        base_score = 50
-        if results.get('Average Sentiment', 0) > 0:
-            base_score += 25
-        if results.get('Recent News Count', 0) > 5:
-            base_score += 25
+        base_score = 50  # Neutral starting point
 
-        return base_score
+        # Sentiment impact (max ±30 points)
+        avg_sentiment = results.get('Average Sentiment', 0)
+        base_score += min(max(avg_sentiment * 30, -30), 30)
+
+        # News volume impact (max 10 points)
+        news_count = results.get('Recent News Count', 0)
+        if news_count >= 10:
+            base_score += 10
+        elif news_count >= 5:
+            base_score += 5
+
+        # Strong sentiment impact (max 10 points)
+        strong_positive = results.get('Strong Positive Count', 0)
+        strong_negative = results.get('Strong Negative Count', 0)
+        sentiment_ratio = (strong_positive - strong_negative) / max(strong_positive + strong_negative, 1)
+        base_score += min(max(sentiment_ratio * 10, -10), 10)
+
+        return min(max(base_score, 0), 100)
 
     def get_key_points(self, results: Dict[str, Any], strengths: bool = True) -> List[str]:
+        """Generate detailed insights from sentiment analysis"""
         points = []
         if not results:
             return points
 
         avg_sentiment = results.get('Average Sentiment', 0)
         news_count = results.get('Recent News Count', 0)
+        strong_pos = results.get('Strong Positive Count', 0)
+        strong_neg = results.get('Strong Negative Count', 0)
+        latest_headlines = results.get('Latest Headlines', [])
 
-        if strengths and avg_sentiment > 0:
-            points.append(f"Positive news sentiment with score {avg_sentiment:.2f}")
-        elif not strengths and avg_sentiment < 0:
-            points.append(f"Negative news sentiment with score {avg_sentiment:.2f}")
+        if strengths:
+            if avg_sentiment > 0.3:
+                points.append(f"Strong positive media sentiment with score of {avg_sentiment:.2f}")
+            if news_count > 10:
+                points.append(f"High media coverage with {news_count} recent articles")
+            if strong_pos > strong_neg:
+                points.append(f"Dominant positive coverage with {strong_pos} strongly positive news items")
+            if latest_headlines and avg_sentiment > 0:
+                points.append(f"Recent positive headline: {latest_headlines[0]}")
+        else:
+            if avg_sentiment < -0.3:
+                points.append(f"Negative media sentiment with score of {avg_sentiment:.2f}")
+            if news_count < 3:
+                points.append(f"Limited media coverage with only {news_count} recent articles")
+            if strong_neg > strong_pos:
+                points.append(f"Concerning negative coverage with {strong_neg} strongly negative news items")
+            if latest_headlines and avg_sentiment < 0:
+                points.append(f"Recent negative headline: {latest_headlines[0]}")
 
-        if strengths and news_count > 5:
-            points.append(f"High news coverage with {news_count} recent articles")
-        elif not strengths and news_count < 3:
-            points.append(f"Limited news coverage with only {news_count} recent articles")
+        return sorted(points, key=len, reverse=True)
 
-        return points
+    def _filter_recent_news(self, news: List[Dict[str, Any]], days: int = 30) -> List[Dict[str, Any]]:
+        """Filter news articles from the last specified days"""
+        current_time = pd.Timestamp.now()
 
-    def _calculate_sentiment_scores(self, news: List[Dict[str, Any]]) -> List[float]:
-        positive_words = ['up', 'rise', 'gain', 'positive', 'growth', 'profit']
-        negative_words = ['down', 'fall', 'drop', 'negative', 'loss', 'debt']
+        # Handle different timestamp fields that might be present in the news data
+        timestamp_fields = ['providerPublishTime', 'publishTime', 'timestamp', 'published']
 
-        sentiment_scores = []
+        filtered_news = []
         for article in news:
-            title = article['title'].lower()
-            score = sum(word in title for word in positive_words) - sum(word in title for word in negative_words)
-            sentiment_scores.append(score)
+            # Try different timestamp fields
+            article_time = None
+            for field in timestamp_fields:
+                if field in article:
+                    try:
+                        # Handle both Unix timestamps and datetime strings
+                        timestamp = article[field]
+                        if isinstance(timestamp, (int, float)):
+                            article_time = pd.Timestamp(timestamp, unit='s')
+                        else:
+                            article_time = pd.Timestamp(timestamp)
+                        break
+                    except:
+                        continue
 
-        return sentiment_scores
+            # If we couldn't parse any timestamp, skip this article
+            if article_time is None:
+                continue
+
+            # Check if article is within the time window
+            if (current_time - article_time).days <= days:
+                filtered_news.append(article)
+
+        return filtered_news
+
+    def _analyze_sentiment_detailed(self, news: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Perform detailed sentiment analysis on news articles"""
+        scores = []
+        strong_positive_count = 0
+        strong_negative_count = 0
+        latest_headlines = []
+
+        # Ensure we have title field
+        title_fields = ['title', 'headline', 'summary']
+
+        for article in news[:10]:  # Analyze most recent 10 articles
+            # Find the title/headline text
+            title = None
+            for field in title_fields:
+                if field in article and article[field]:
+                    title = article[field].lower()
+                    latest_headlines.append(article[field])
+                    break
+
+            if not title:
+                continue
+
+            # Calculate sentiment score
+            strong_pos = sum(word in title for word in self.sentiment_words['positive']['strong'])
+            strong_neg = sum(word in title for word in self.sentiment_words['negative']['strong'])
+            mod_pos = sum(word in title for word in self.sentiment_words['positive']['moderate'])
+            mod_neg = sum(word in title for word in self.sentiment_words['negative']['moderate'])
+
+            total_matches = strong_pos + strong_neg + mod_pos + mod_neg
+            if total_matches > 0:
+                score = (strong_pos * 2 + mod_pos - strong_neg * 2 - mod_neg) / total_matches
+                scores.append(score)
+
+                strong_positive_count += 1 if strong_pos > 0 and strong_neg == 0 else 0
+                strong_negative_count += 1 if strong_neg > 0 and strong_pos == 0 else 0
+
+        avg_sentiment = np.mean(scores) if scores else 0
+        sentiment_trend = self._determine_sentiment_trend(scores)
+
+        return {
+            'average_sentiment': avg_sentiment,
+            'strong_positive_count': strong_positive_count,
+            'strong_negative_count': strong_negative_count,
+            'trend': sentiment_trend,
+            'latest_headlines': latest_headlines[:3]  # Return only top 3 headlines
+        }
+
+    def _determine_sentiment_trend(self, scores: List[float]) -> str:
+        """Determine the trend in sentiment scores"""
+        if not scores:
+            return "Neutral"
+
+        # Calculate moving average
+        if len(scores) >= 3:
+            recent_avg = np.mean(scores[:3])
+            older_avg = np.mean(scores[3:])
+
+            if recent_avg > older_avg + 0.2:
+                return "Improving"
+            elif recent_avg < older_avg - 0.2:
+                return "Deteriorating"
+
+        return "Stable"
+
+    def _calculate_news_volume_trend(self, news: List[Dict[str, Any]]) -> str:
+        """Analyze the trend in news volume"""
+        if len(news) < 2:
+            return "Insufficient Data"
+
+        # Group news by day
+        news_days = {}
+        for article in news:
+            date = pd.Timestamp(article['providerPublishTime'], unit='s').date()
+            news_days[date] = news_days.get(date, 0) + 1
+
+        daily_volumes = list(news_days.values())
+        if len(daily_volumes) >= 3:
+            recent_avg = np.mean(daily_volumes[:3])
+            older_avg = np.mean(daily_volumes[3:])
+
+            if recent_avg > older_avg * 1.5:
+                return "Increasing"
+            elif recent_avg < older_avg * 0.5:
+                return "Decreasing"
+
+        return "Stable"
 
 
 class StockAnalyzer:
